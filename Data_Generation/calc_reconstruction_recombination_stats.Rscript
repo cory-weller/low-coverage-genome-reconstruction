@@ -65,4 +65,4 @@ getRecombinationStats <- function(filenames) {
 recombination.DT <- getRecombinationStats(filenames)
 
 
-write.table(recombination.DT, file="imputation_recombination_estimates.tab", quote=F, col.names=TRUE, row.names=FALSE, sep="\t")
+write.table(recombination.DT, file="reconstruction_recombination_estimates.tab", quote=F, col.names=TRUE, row.names=FALSE, sep="\t")
