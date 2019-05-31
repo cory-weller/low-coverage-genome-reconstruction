@@ -1,0 +1,166 @@
+#!/usr/bin/env Rscript
+
+library(data.table)
+library(ggplot2)
+library(ggthemes)
+library(ggbeeswarm)
+
+
+dat <- fread('zcat imputation_founder_selection_stats.tab.gz')
+
+dat[, popType := ifelse(is.na(Ne), "dgrp","scrm")]
+
+dat[, pop := paste(popType, nFounders, sep="")]
+
+dat[, threshold := factor(threshold)]
+dat[, population_type := ifelse(is.na(Ne), "dgrp","scrm")]
+
+dat.ag <- dat[maxCount==16, list(
+    qmin=quantile(N_total_chosen, 0.025),
+    qlower=quantile(N_total_chosen, 0.25),
+    qmiddle=quantile(N_total_chosen, 0.5),
+    qupper=quantile(N_total_chosen, 0.75),
+    qmax=quantile(N_total_chosen, 0.975)),
+by=list(population_type, nFounders, threshold, coverage, Ne, mu)]
+
+
+
+dat.ag[, threshold := factor(threshold, levels=c(0.9, 0.95, 0.99, 0.999))]
+
+dat.ag[,nFounders := factor(nFounders)]
+
+dat.ag[population_type=="dgrp" & nFounders==128, population_label := "DGRP-founded HS (128)"]
+dat.ag[population_type=="dgrp" & nFounders==32, population_label := "DGRP-founded HS (32)"]
+dat.ag[population_type=="scrm" & nFounders==32, population_label := "Coalescent-founded HS (32)"]
+dat.ag[population_type=="scrm" & nFounders==128, population_label := "Coalescent-founded HS (128)"]
+
+
+    dat.ag[Ne==1e+04, Ne_label := "N[e]: 10^4"]
+    dat.ag[Ne==1e+05, Ne_label := "N[e]: 10^5"]
+    dat.ag[Ne==1e+06, Ne_label := "N[e]: 10^6"]
+    dat.ag[mu==1e-09, mu_label := "mu: 10^-9"]
+    dat.ag[mu==5e-09, mu_label := "mu: 5 %*% 10^-9"]
+    dat.ag[mu==1e-08, mu_label := "mu: 10^-8"]
+    dat.ag[, Ne_label := factor(Ne_label, levels=c("N[e]: 10^4","N[e]: 10^5","N[e]: 10^6"))]
+    dat.ag[, mu_label := factor(mu_label, levels=c("mu: 10^-9","mu: 5 %*% 10^-9","mu: 10^-8"))]
+
+
+dat.ag[population_type=="dgrp", population_label := "DGRP-derived"]
+dat.ag[population_type=="scrm", population_label := "Coalescent-derived"]
+
+
+g.subset <- ggplot(data=dat.ag[(population_type=="dgrp" & coverage=="0.05X") | (Ne==1e6 & mu==5e-9)], mapping=aes(x=threshold, middle=qmiddle, ymin=qmin, lower=qlower, upper=qupper, ymax=qmax, fill=nFounders, group=interaction(population_type, nFounders, threshold))) +
+geom_boxplot(stat="identity", position=position_dodge(1)) +
+facet_grid(~threshold) +
+labs(x="HARP threshold used", y="Number of founders selected for reconstruction", title="",
+fill="Number of Inbred Founding Lines") +
+theme_few(10) +
+scale_fill_manual(values=c("white","gray")) +
+theme(legend.position="bottom")
+ggsave(g.subset, file="subset_founder_complexity.png", width=12, height=12, units="cm")
+
+
+
+g.dgrp <- ggplot(data=dat.ag[population_type=="dgrp"], mapping=aes(x=threshold, fill=nFounders, group=interaction( nFounders, threshold, coverage))) +
+geom_boxplot(stat="identity",position=position_dodge(1), aes(middle=qmiddle, ymin=qmin, lower=qlower, upper=qupper, ymax=qmax)) +
+facet_grid(.~coverage) +
+labs(x="HARP threshold used", y="Number of founders selected for reconstruction", title="Founders selected for DGRP-derived reconstructions",
+fill="Number of Inbred Founding Lines") +
+theme_few(10) +
+scale_fill_manual(values=c("white","gray")) +
+theme(legend.position="bottom")
+
+g.scrm <- ggplot(data=dat.ag[population_type=="scrm"], mapping=aes(x=threshold, fill=nFounders, group=interaction(nFounders, threshold, Ne, mu))) +
+geom_boxplot(stat="identity",position=position_dodge(1), aes(middle=qmiddle, ymin=qmin, lower=qlower, upper=qupper, ymax=qmax)) +
+facet_grid(Ne_label~mu_label, labeller="label_parsed") +
+labs(x="HARP threshold used", y="Number of founders selected for reconstruction", title="Founders selected for coalescent-derived reconstructions",
+fill="Number of Inbred Founding Lines") +
+theme_few(10) +
+scale_fill_manual(values=c("white","gray")) +
+theme(legend.position="bottom")
+
+#####
+
+
+# redo
+
+
+dat2.ag <- dat[, list("meanChosen"=mean(N_total_chosen), stdev=sd(N_total_chosen)),
+by=list(population_type, nFounders, threshold, coverage, Ne, mu, maxCount)]
+dat2.ag[, threshold := factor(threshold, levels=c(0.9, 0.95, 0.99, 0.999))]
+dat2.ag[,nFounders := factor(nFounders)]
+
+dat2.ag[population_type=="dgrp" & nFounders==128, population_label := "DGRP-founded HS (128)"]
+dat2.ag[population_type=="dgrp" & nFounders==32, population_label := "DGRP-founded HS (32)"]
+dat2.ag[population_type=="scrm" & nFounders==32, population_label := "Coalescent-founded HS (32)"]
+dat2.ag[population_type=="scrm" & nFounders==128, population_label := "Coalescent-founded HS (128)"]
+
+dat2.ag[Ne==1e+04, Ne_label := "N[e]: 10^4"]
+dat2.ag[Ne==1e+05, Ne_label := "N[e]: 10^5"]
+dat2.ag[Ne==1e+06, Ne_label := "N[e]: 10^6"]
+dat2.ag[mu==1e-09, mu_label := "mu: 10^-9"]
+dat2.ag[mu==5e-09, mu_label := "mu: 5 %*% 10^-9"]
+dat2.ag[mu==1e-08, mu_label := "mu: 10^-8"]
+dat2.ag[, Ne_label := factor(Ne_label, levels=c("N[e]: 10^4","N[e]: 10^5","N[e]: 10^6"))]
+dat2.ag[, mu_label := factor(mu_label, levels=c("mu: 10^-9","mu: 5 %*% 10^-9","mu: 10^-8"))]
+
+
+dat2.ag[population_type=="dgrp", population_label := "DGRP-derived"]
+dat2.ag[population_type=="scrm", population_label := "Coalescent-derived"]
+dat2.ag[, threshold_label := paste("HARP Threshold: ", threshold, sep="")]
+dat2.ag[, nFounders_label := paste(nFounders, " Founding Lines", sep="")]
+
+
+g.subset <- ggplot(data=dat2.ag[(population_type=="dgrp" & coverage=="0.05X") | (Ne==1e6 & mu==5e-9)][maxCount<=30], mapping=aes(x=maxCount, y=meanChosen, ymin=meanChosen-stdev, ymax=meanChosen+stdev, color=factor(population_label), fill=factor(population_label), linetype=factor(nFounders), group=interaction(nFounders,population_label,threshold))) +
+geom_ribbon(alpha=0.6, color=NA) +
+facet_grid(nFounders_label~threshold_label) +
+scale_fill_manual(values=c("black","gray")) +
+scale_color_manual(values=c("black","gray")) +
+scale_linetype_manual(values=c("dashed","solid")) +
+labs(x="Maximum count of most likely ancestors", y="Number of ancestors chosen for reconstruction", fill="Genetic Variation Source", color="Genetic Variation Source") +
+guides(linetype=FALSE) +
+theme_few(10) +
+theme(legend.position="bottom") +
+geom_line()
+
+ggsave(g.subset, file="Figure_04_number_founders_selected.png", width=20, height=12, units="cm")
+
+
+g.scrm32 <- ggplot(data=dat2.ag[population_type=="scrm"][maxCount<=30][nFounders==32], mapping=aes(x=maxCount, y=meanChosen, ymin=meanChosen-stdev, ymax=meanChosen+stdev, color=Ne_label, fill=Ne_label, group=interaction(nFounders,coverage,threshold, Ne, mu))) +
+facet_grid(mu_label ~ threshold, labeller="label_parsed") +
+geom_ribbon(alpha=0.6, color=NA) +
+guides(linetype=FALSE) +
+theme_few(10) +
+labs(x="Maximum count of most likely ancestors", y="Number of ancestors chosen for reconstruction", color="Population Size", fill="Population Size") +
+geom_line() +
+scale_fill_discrete(labels=c(parse(text="N[e]: 10^4"), parse(text="N[e]: 10^5"), parse(text="N[e]: 10^6"))) +
+theme(legend.position="right", legend.direction="vertical") +
+guides(color=FALSE)
+
+g.scrm128 <- ggplot(data=dat2.ag[population_type=="scrm"][maxCount<=30][nFounders==128], mapping=aes(x=maxCount, y=meanChosen, ymin=meanChosen-stdev, ymax=meanChosen+stdev, color=Ne_label, fill=Ne_label, group=interaction(nFounders,coverage,threshold, Ne, mu))) +
+facet_grid(mu_label ~ threshold, labeller="label_parsed") +
+geom_ribbon(alpha=0.6, color=NA) +
+guides(linetype=FALSE) +
+theme_few(10) +
+labs(x="Maximum count of most likely ancestors", y="Number of ancestors chosen for reconstruction", color="Population Size", fill="Population Size") +
+geom_line() +
+scale_fill_discrete(labels=c(parse(text="N[e]: 10^4"), parse(text="N[e]: 10^5"), parse(text="N[e]: 10^6"))) +
+theme(legend.position="right", legend.direction="vertical") +
+guides(color=FALSE)
+
+
+
+g.dgrp <- ggplot(data=dat2.ag[population_type=="dgrp"][maxCount<=30], mapping=aes(x=maxCount, y=meanChosen, ymin=meanChosen-stdev, ymax=meanChosen+stdev, color=factor(coverage), fill=factor(coverage), group=interaction(nFounders,coverage,threshold))) +
+geom_ribbon(alpha=0.6, color=NA) +
+facet_grid(nFounders_label~threshold_label) +
+scale_fill_manual(values=c("gray","black")) +
+scale_color_manual(values=c("gray","black")) +
+scale_linetype_manual(values=c("dashed","solid")) +
+labs(x="Maximum count of most likely ancestors", y="Number of ancestors chosen for reconstruction", fill="Sequencing Coverage", color="Sequencing Coverage") +
+theme_few(10) +
+theme(legend.position="bottom") +
+geom_line()
+
+ggsave(g.scrm32, file="Figure_S05_scrm32_number_founders_selected.png", width=20, height=12, units="cm")
+ggsave(g.scrm128, file="Figure_S06_scrm128_number_founders_selected.png", width=20, height=12, units="cm")
+ggsave(g.dgrp, file="Figure_S07_dgrp_number_founders_selected.png", width=20, height=12, units="cm")

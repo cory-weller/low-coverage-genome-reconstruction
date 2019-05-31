@@ -1,0 +1,226 @@
+#!/usr/bin/env Rscript
+
+library(data.table)
+library(ggplot2)
+library(foreach)
+library(ggthemes)
+
+founder_selection <- fread('zcat reconstruction_founder_selection_stats.tab.gz', header=TRUE)
+
+founder_selection[, founders_missed := N_true_founders_in_individual - N_true_founders_chosen ]
+founder_selection.ag <- founder_selection[! chromosome %in% c("X","chr5"), list(
+                    "meanFoundersMissed"=mean(founders_missed),
+                    "meanFractionCovered"=mean(fraction_covered)
+                ), by=list(population, Ne, mu, nFounders, coverage, maxCount, threshold)]
+
+founder_selection.ag[Ne==1e+04, Ne_label := "N[e]: 10^4"]
+founder_selection.ag[Ne==1e+05, Ne_label := "N[e]: 10^5"]
+founder_selection.ag[Ne==1e+06, Ne_label := "N[e]: 10^6"]
+founder_selection.ag[mu==1e-09, mu_label := "mu: 10^-9"]
+founder_selection.ag[mu==5e-09, mu_label := "mu: 5 %*% 10^-9"]
+founder_selection.ag[mu==1e-08, mu_label := "mu: 10^-8"]
+founder_selection.ag[, Ne_label := factor(Ne_label, levels=c("N[e]: 10^4","N[e]: 10^5","N[e]: 10^6"))]
+founder_selection.ag[, mu_label := factor(mu_label, levels=c("mu: 10^-9","mu: 5 %*% 10^-9","mu: 10^-8"))]
+
+founder_selection.ag[, nFounders := factor(nFounders, levels=c(32,128))]
+founder_selection.ag[, threshold := factor(threshold, levels=c(0.9, 0.95, 0.99, 0.999))]
+founder_selection.ag[, maxCount := factor(maxCount, levels=1:30)]
+
+
+#SUBSET for main text
+
+dat.subset <- founder_selection.ag[(population=="scrm" & Ne == 1e+06 & mu == 5e-09) | (population=="dgrp" & coverage == "0.05X")][threshold==0.99]
+dat.subset[, "Fraction Missed" := 1-meanFractionCovered]
+setnames(dat.subset, "meanFoundersMissed", "Founders Missed")
+dat.subset.long <- melt(dat.subset, measure.vars=c("Founders Missed", "Fraction Missed"), value.name="value", variable.name="metric")
+dat.subset.long[population=="scrm", population_label := "Coalescent-derived"]
+dat.subset.long[population=="dgrp", population_label := "DGRP-derived"]
+
+
+dat.subset2 <- founder_selection.ag[(population=="scrm" & Ne == 1e+06 & mu == 5e-09) | (population=="dgrp" & coverage == "0.05X")]
+dat.subset2[, "Fraction Missed" := 1-meanFractionCovered]
+setnames(dat.subset2, "meanFoundersMissed", "Founders Missed")
+dat.subset2.long <- melt(dat.subset2, measure.vars=c("Founders Missed", "Fraction Missed"), value.name="value", variable.name="metric")
+dat.subset2.long[population=="scrm", population_label := "Coalescent-derived"]
+dat.subset2.long[population=="dgrp", population_label := "DGRP-derived"]
+dat.subset2.long[, threshold_label := paste("HARP Threshold: ", threshold, sep="")]
+
+
+
+dat.subset2.long[metric=="Fraction Missed", metric_label := "Fraction of Chromosome\nUnrepresented"]
+dat.subset2.long[metric=="Founders Missed", metric_label := "Number of True\nAncestors Excluded"]
+
+
+g.subset.allThresholds <- ggplot(dat.subset2.long[as.numeric(maxCount) <= 30], mapping=aes(x=maxCount, y=value, color=population_label, group=interaction(population,nFounders), linetype=nFounders)) +
+geom_line() +
+scale_x_discrete(breaks=c(4, 8, 12, 16, 20, 24, 28), labels =c(4, 8, 12, 16, 20, 24, 28)) +
+theme_few(10) +
+facet_grid(metric_label~threshold_label, scales="free", switch="y") +
+labs(   x="Top N Most Likely Ancestors Chosen",
+        y="",
+        title="",
+        color="Genetic Variation Source",
+        linetype="Founding Lines") +
+        theme(strip.placement = "outside",
+              strip.text.y = element_text(size = 10)) +
+theme(legend.position="bottom", legend.direction="vertical") +
+scale_color_manual(values=c("gray70","black")) +
+scale_linetype_manual(values=c("dashed","solid"))
+
+ggsave(g.subset.allThresholds, file="figure_03_ancestor_selection.png", width=20, height=12, units="cm")
+
+
+
+
+g.both.subset <- ggplot(dat.subset.long[as.numeric(maxCount) <= 20], mapping=aes(x=maxCount, y=value, color=population_label, group=interaction(population,nFounders), linetype=nFounders)) +
+geom_line() +
+scale_x_discrete(breaks=c(4, 8, 12, 16, 20), labels =c(4, 8, 12, 16, 20)) +
+theme_few(10) +
+facet_wrap(~metric, scales="free", strip.position="left") +
+labs(   x="Top N Most Likely Ancestors Chosen",
+        y="",
+        title="",
+        color="Genetic Variation Source",
+        linetype="Founding Lines") +
+        theme(strip.placement = "outside",
+              strip.text.y = element_text(size = 12)) +
+theme(legend.position="bottom", legend.direction="vertical") +
+scale_color_manual(values=c("gray70","black"))
+
+ggsave(g.both.subset, file="ancestor_selection_subset.png", width=12, height=10, units="cm")
+
+
+
+g.scrm.count.all <- ggplot(founder_selection.ag[population=="scrm"], mapping=aes(x=maxCount, y=(meanFoundersMissed), color=threshold, group=interaction(threshold,nFounders), linetype=nFounders)) +
+geom_line() +
+scale_x_discrete(breaks=c(4, 8, 12, 16, 20, 24, 28), labels =c(4, 8, 12, 16, 20, 24, 28)) +
+theme_few(18) +
+labs(   x="Top N Most Likely Founders Chosen",
+        y="Number of True Founders Missed",
+        title="Founder Selection Optimization, Coalescent Haplotypes",
+        color="HARP threshold",
+        linetype="Founding Lines") +
+facet_grid(mu_label~Ne_label,  labeller="label_parsed") +
+ylim(0,2.5) +
+theme(legend.position="bottom")
+
+
+
+g.scrm.fraction.all <- ggplot(founder_selection.ag[population=="scrm"], mapping=aes(x=maxCount, y=(1-meanFractionCovered), color=threshold, group=interaction(threshold,nFounders), linetype=nFounders)) +
+geom_line() +
+scale_x_discrete(breaks=c(4, 8, 12, 16, 20, 24, 28), labels =c(4, 8, 12, 16, 20, 24, 28)) +
+theme_few(18) +
+labs(   x="Top N Most Likely Founders Chosen",
+        y="Fraction of Chromosome Represented",
+        title="Founder Selection Optimization, Coalescent Haplotypes",
+        color="HARP threshold",
+        linetype="Founding Lines") +
+facet_grid(mu_label~Ne_label,  labeller="label_parsed") +
+ylim(0, 0.5) +
+theme(legend.position="bottom")
+
+
+
+
+############## DGRP ###########
+
+
+
+g.dgrp.count.all <- ggplot(founder_selection.ag[population=="dgrp"], mapping=aes(x=maxCount, y=(meanFoundersMissed), color=threshold, group=interaction(threshold,nFounders), linetype=nFounders)) +
+geom_line() +
+scale_x_discrete(breaks=c(4, 8, 12, 16, 20, 24, 28), labels =c(4, 8, 12, 16, 20, 24, 28)) +
+theme_few(18) +
+labs(   x="Top N Most Likely Founders Chosen",
+        y="Number of True Founders Missed",
+        title="Founder Selection Optimization, DGRP Haplotypes",
+        color="HARP threshold",
+        linetype="Founding Lines") +
+facet_grid(.~coverage,  labeller="label_both") +
+theme(legend.position="bottom") +
+ylim(0,0.6)
+
+g.dgrp.fraction.all <- ggplot(founder_selection.ag[population=="dgrp"], mapping=aes(x=maxCount, y=(1-meanFractionCovered), color=threshold, group=interaction(threshold,nFounders), linetype=nFounders)) +
+geom_line() +
+scale_x_discrete(breaks=c(4, 8, 12, 16, 20, 24, 28), labels =c(4, 8, 12, 16, 20, 24, 28)) +
+theme_few(18) +
+labs(   x="Top N Most Likely Founders Chosen",
+        y="Fraction of Chromosome Represented",
+        title="Founder Selection Optimization, DGRP Haplotypes",
+        color="HARP threshold",
+        linetype="Founding Lines") +
+facet_grid(.~coverage,  labeller="label_both") +
+theme(legend.position="bottom") +
+ylim(0,0.2)
+
+
+
+### REDO
+
+
+dat.subset3 <- copy(founder_selection.ag)
+dat.subset3[, "Fraction Missed" := 1-meanFractionCovered]
+setnames(dat.subset3, "meanFoundersMissed", "Founders Missed")
+dat.subset3.long <- melt(dat.subset3, measure.vars=c("Founders Missed", "Fraction Missed"), value.name="value", variable.name="metric")
+dat.subset3.long[population=="scrm", population_label := "Coalescent-derived"]
+dat.subset3.long[population=="dgrp", population_label := "DGRP-derived"]
+
+g.scrmcount <- ggplot(dat.subset3.long[population=="scrm" & metric=="Founders Missed"][as.numeric(maxCount) <= 30], mapping=aes(x=maxCount, y=value, linetype=factor(nFounders), color=Ne_label, group=interaction(mu, threshold, Ne, nFounders))) +
+geom_line() +
+theme_few(10) +
+facet_grid(mu_label~threshold, label="label_parsed") +
+labs(   x="Top N Most Likely Ancestors Chosen",
+        y="Number of True Ancestors Excluded",
+        title="",
+        color="Population size",
+        linetype="Founding Lines") +
+        theme(strip.placement = "outside",
+              strip.text.y = element_text(size = 10)) +
+theme(legend.position="bottom", legend.direction="vertical") +
+scale_linetype_manual(values=c("dashed","solid")) +
+scale_color_discrete(labels=c(parse(text="N[e]: 10^4"), parse(text="N[e]: 10^5"), parse(text="N[e]: 10^6"))) +
+scale_x_discrete(breaks=c(4, 8, 12, 16, 20, 24, 28), labels =c(4, 8, 12, 16, 20, 24, 28))
+
+
+g.scrmfraction <- ggplot(dat.subset3.long[population=="scrm" & metric=="Fraction Missed"][as.numeric(maxCount) <= 30], mapping=aes(x=maxCount, y=value, linetype=factor(nFounders), color=Ne_label, group=interaction(mu, threshold, Ne, nFounders))) +
+geom_line() +
+theme_few(10) +
+facet_grid(mu_label~threshold, label="label_parsed") +
+labs(   x="Top N Most Likely Ancestors Chosen",
+        y="Fraction of Chromosome Unrepresented",
+        title="",
+        color="Population size",
+        linetype="Founding Lines") +
+        theme(strip.placement = "outside",
+              strip.text.y = element_text(size = 10)) +
+theme(legend.position="bottom", legend.direction="vertical") +
+scale_linetype_manual(values=c("dashed","solid")) +
+scale_color_discrete(labels=c(parse(text="N[e]: 10^4"), parse(text="N[e]: 10^5"), parse(text="N[e]: 10^6"))) +
+scale_x_discrete(breaks=c(4, 8, 12, 16, 20, 24, 28), labels =c(4, 8, 12, 16, 20, 24, 28))
+
+
+ggsave(g.scrmcount, file="figure_S02_scrm_founder_selection_count.png", width=20, height=12, units="cm")
+ggsave(g.scrmfraction, file="figure_S03_scrm_founder_selection_fraction.png", width=20, height=12, units="cm")
+
+dat.subset3.long[metric=="Fraction Missed", metric_label := "Fraction of Chromosome\nUnrepresented"]
+dat.subset3.long[metric=="Founders Missed", metric_label := "Number of True\nAncestors Excluded"]
+
+dat.subset3.long[, metric_label := factor(metric_label, levels=c("Number of True\nAncestors Excluded","Fraction of Chromosome\nUnrepresented"))]
+
+g.dgrpCoverage <- ggplot(dat.subset3.long[population=="dgrp"][as.numeric(maxCount) <= 30][! (metric=="Founders Missed" & value >2)][! (metric=="Fraction Missed" & value > 0.2)], mapping=aes(x=maxCount, y=value, linetype=factor(nFounders), color=coverage, group=interaction(threshold, coverage, nFounders, metric_label))) +
+geom_line() +
+theme_few(10) +
+facet_grid(metric_label~threshold, scales="free", switch="y") +
+labs(   x="Top N Most Likely Ancestors Chosen",
+        y="",
+        title="",
+        color="Coverage",
+        linetype="Founding Lines") +
+        theme(strip.placement = "outside",
+              strip.text.y = element_text(size = 10)) +
+theme(legend.position="bottom", legend.direction="vertical") +
+scale_linetype_manual(values=c("dashed","solid")) +
+scale_color_manual(values=c("gray","black")) +
+scale_x_discrete(breaks=c(4, 8, 12, 16, 20, 24, 28), labels =c(4, 8, 12, 16, 20, 24, 28))
+
+
+ggsave(g.dgrpCoverage, file="figure_S04_dgrp_founder_selection.png", width=20, height=12, units="cm")

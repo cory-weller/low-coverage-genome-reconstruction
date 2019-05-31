@@ -1,0 +1,128 @@
+#!/usr/bin/env R
+
+library(data.table)
+library(foreach)
+library(ggplot2)
+library(ggthemes)
+library(ggbeeswarm)
+
+summaries <- fread('summaries.all.tab', sep="\t", header=FALSE,  col.names=c("population_type", "population_stem", "N_founders", "MAF", "PVE", "Population_Replicate", "Replicate", "focal_snp_chr", "focal_snp_pos", "N_case_individuals", "N_control_individuals", "lambdaGC1000", "max_chisq", "focal_chisq", "focal_rank", "N_equally_top_snps", "top_snp_chr", "top_snp_pos", "distance_from_top_to_focal_snp"))
+
+most_significant_regions <- fread("clusters.all.tab", sep="\t", header=FALSE, col.names=c("population_type", "population_stem", "N_founders", "MAF", "PVE", "Population_Replicate", "Replicate", "chrom", "pos", "chisq", "peak_width", "rank", "containsFocal"))
+
+
+# setkey(summaries, population_type, population_stem, N_founders, MAF, PVE, Population_Replicate, Replicate)
+# setkey(most_significant_regions, population_type, population_stem, N_founders, MAF, PVE, Population_Replicate, Replicate)
+#
+# dat.merge <- merge(summaries, most_significant_regions[rank==1 & containsFocal==TRUE])
+#
+# dat.merge[, population := paste(population_stem, N_founders, sep="_")]
+#
+#
+# dat.merge[, distFromFocal := abs(focal_snp_pos - pos)]
+#
+# dat.ag <- dat.merge[, list(.N,
+#                 "bottomy"=quantile(distFromFocal, 0.025),
+#                 "lowery"=quantile(distFromFocal, 0.25),
+#                 "middle"=quantile(distFromFocal, 0.5),
+#                 "uppery"=quantile(distFromFocal, 0.75),
+#                 "topy"=quantile(distFromFocal, 0.975)),
+#             by=list(MAF, PVE, peak_width, population)]
+#
+#
+#ggplot(dat.ag[PVE==0.1], mapping=aes(x=population, middle=middle, ymin=bottomy, lower=lowery, ymax=topy, upper=uppery)) + facet_grid(peak_width~MAF, scales="free", label="label_both") + geom_boxplot(stat="identity") + geom_text(aes(label=N, y=(topy*1.1))) + scale_y_log10()
+
+# dat.merge[,distFromFocal := as.numeric(as.character(distFromFocal))]
+
+# N_zeros <- nrow(dat.merge[distFromFocal==0])
+# dat.merge[distFromFocal==0, distFromFocal := 1 + 0.1*runif(N_zeros)]
+#
+# ggplot(dat.merge[PVE==0.1], mapping=aes(x=population,y=log10(distFromFocal))) + facet_grid(peak_width~MAF, scales="free", label="label_both") + geom_quasirandom() + # theme_few(10)
+#
+# ggplot(dat.merge[PVE==0.05], mapping=aes(x=population,y=log10(distFromFocal))) + facet_grid(peak_width~MAF, scales="free", label="label_both") + geom_quasirandom() + # theme_few(10)
+#
+# ggplot(data=dat.merge[PVE==0.05], mapping=aes(x=population.y, y=distFromFocal)) + facet_grid(peak_width~MAF, scales="free", label="label_both") + geom_boxplot()
+
+
+
+
+summaries[, population := factor(paste(population_stem, N_founders, sep="_"), levels=c("dgrp_128","hybrid_swarm_32", "hybrid_swarm_128", "dspr_800", "outbred_dgrp_F50_128"))]
+most_significant_regions[, population := factor(paste(population_stem, N_founders, sep="_"), levels=c("dgrp_128","hybrid_swarm_32", "hybrid_swarm_128", "dspr_800", "outbred_dgrp_F50_128"))]
+
+regions_cumulative <- foreach(rank.i=1:25, .combine="rbind") %do% {
+    most_significant_regions[rank <= rank.i, list("rank"=rank.i, "containsFocal"=ifelse(sum(containsFocal>0), 1, 0)), by=list(population, population_type, peak_width, MAF, PVE, N_founders, Population_Replicate, Replicate)]
+}
+
+regions_cumulative.ag <-  regions_cumulative[, list("N"=sum(containsFocal)), by=list(population_type, population, peak_width, MAF, PVE, N_founders, rank)]
+
+# regions_cumulative.ag[, MAF := factor(MAF, levels=c(0.5, 0.25, 0.125))]
+
+regions_cumulative.ag[population=="dgrp_128", population_label := "ILs (128)"]
+regions_cumulative.ag[population=="dspr_800", population_label := "RILs (800)"]
+regions_cumulative.ag[population=="hybrid_swarm_32", population_label := "HS (32)"]
+regions_cumulative.ag[population=="hybrid_swarm_128", population_label := "HS (128)"]
+regions_cumulative.ag[population=="outbred_dgrp_F50_128", population_label := "Outbred (128)"]
+
+regions_cumulative.ag[, population_label := factor(population_label, levels=c("ILs (128)", "RILs (800)","HS (32)","HS (128)","Outbred (128)" ))]
+
+
+regions_cumulative.ag[peak_width==0, peak_width_label := "Exact SNP"]
+regions_cumulative.ag[peak_width==1e3, peak_width_label := "1 kb Window"]
+regions_cumulative.ag[peak_width==1e4, peak_width_label := "10 kb Window"]
+regions_cumulative.ag[peak_width==1e5, peak_width_label := "100 kb Window"]
+regions_cumulative.ag[, peak_width_label := factor(peak_width_label, levels=c("Exact SNP","1 kb Window","10 kb Window", "100 kb Window"))]
+
+regions_cumulative.ag[, PVE := factor(PVE, levels=c(0.10, 0.05, 0), labels=c("10%", "5%", "0%"))]
+
+
+  # replicate data for all MAF values
+tmp <- copy(regions_cumulative.ag[PVE=="0%"])
+tmp[, MAF := 0.25]
+tmp2 <- copy(regions_cumulative.ag[PVE=="0%"])
+tmp2[, MAF := 0.125]
+regions_cumulative.ag <- rbindlist(list(regions_cumulative.ag, tmp, tmp2))
+
+regions_cumulative.ag[MAF==0.125, MAF_label := "Causal Allele Frequency: 0.125"]
+regions_cumulative.ag[MAF==0.25, MAF_label := "Causal Allele Frequency: 0.25"]
+regions_cumulative.ag[MAF==0.5, MAF_label := "Causal Allele Frequency: 0.5"]
+regions_cumulative.ag[, MAF_label := factor(MAF_label, levels=c("Causal Allele Frequency: 0.5", "Causal Allele Frequency: 0.25", "Causal Allele Frequency: 0.125"))]
+
+g.subset <- ggplot(data=regions_cumulative.ag[PVE=="10%" & peak_width %in% c(0, 1e5) & MAF %in% c(0.125, 0.5)], mapping=aes(x=rank, y=N/500, group=interaction(population_label, PVE, MAF), color=population_label)) +
+geom_line() +
+ylim(0,1) +
+facet_grid(MAF_label~peak_width_label) +
+theme_few(10) +
+labs(x="Top N most significant regions selected",
+     y="Cumulative Probability of Selecting Causal SNP",
+     color="Mapping Population") +
+     theme(plot.title=element_blank())
+
+ ggsave(g.subset, file="Figure_06_gwas_acc.png", width=12, height=10, units="cm")
+
+
+ g.all <- ggplot(data=regions_cumulative.ag, mapping=aes(x=rank, y=N/500, group=interaction(population_label, PVE, MAF), color=population_label, linetype=PVE)) +
+ geom_line() +
+ ylim(0,1) +
+ facet_grid(MAF_label~peak_width_label) +
+ theme_few(10) +
+ labs(x="Top N most significant regions selected",
+     y="Cumulative Probability of Selecting Causal SNP",
+      color="Mapping Population",
+      linetype="PVE") +
+      theme(plot.title=element_blank()) +
+      scale_linetype_manual(values=c("solid","dashed","dotted"))
+
+ ggsave(g.all, file="Figure_S10_gwas_acc.png", width=20, height=15, units="cm")
+
+
+# ggplot(data=regions_cumulative.ag[PVE==0.1 & peak_width %in% c(0, 1e5) & MAF %in% c(0.125, 0.5)], mapping=aes(x=rank, y=N/500, group=interaction(population_label, PVE, # MAF), shape=population_label)) +
+# geom_point(alpha=0.4) +
+# ylim(0,1) +
+# facet_grid(MAF~peak_width, labeller="label_both") +
+# theme_few(14) +
+# labs(x="Top N most significant regions selected",
+#      y="Cumulative probability of selecting causal SNP",
+#      title="Accuracy of Simulated GWAS",
+#      color="Mapping Population") +
+#      scale_color_manual(values=c('#e66101','#fdb863','#000000','#b2abd2','#5e3c99')) +
+#      scale_shape_manual(values=c(16,17,2,17,5))

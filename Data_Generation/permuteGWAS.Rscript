@@ -1,0 +1,515 @@
+#!/usr/bin/env Rscript
+library(data.table)
+library(foreach)
+library(doMC)
+library(ggplot2)
+registerDoMC(cores=1)
+
+polarizeVCF <- function(DT) {
+    # Polarizes a VCF data.table to -1 for alt and +1 for ref allele
+    # save column names of lineIDs for subset with .SD
+    cols <- colnames(DT)[10:ncol(DT)]
+
+    # If in "0/0" format instead of "0" format; convert to single digit
+    if (any("1/1" == dat.vcf[,10:length(colnames(dat.vcf)), with=FALSE])) {
+        # convert to factor, then to numeric, such that "0/0" is now 1, "1/1" is now 3
+        DT[, (cols) := lapply(.SD, factor, levels=c("0/0","padding","1/1")), .SDcols=cols]
+        DT[, (cols) := lapply(.SD, as.numeric), .SDcols=cols]
+
+        # some arithmetic such that 1 stays 1, and 3 is now -1
+        DT[, (cols) := lapply(.SD, function(x) ((x*-1)+2)), .SDcols=cols]
+	} else if (any(2 == dat.vcf[,10:length(colnames(dat.vcf)), with=FALSE])) {
+		DT[, (cols) := lapply(.SD, function(x) ((x-1)*-1)), .SDcols=cols][]   
+	} else if (any(1 == dat.vcf[,10:length(colnames(dat.vcf)), with=FALSE])) {
+        # some arithmetic such that 0 is now 1, and 1 is now -1
+		DT[, (cols) := lapply(.SD, function(x) ((x*-2)+1)), .SDcols=cols][]
+			}
+    # convert any NA values to 0
+    for (j in cols) {
+        set(DT, which(is.na(DT[[j]])), j, 0)
+    }
+    invisible(DT[])
+}
+
+
+
+calcFreqs <- function(dat.haps, dat.vcf) {
+
+    # Find every recombination breakpoint throughout all maps
+        bps <- sort(unique(dat.haps[,stop]))
+        highest.bp <- max(dat.haps[,stop])
+        bps <- bps[1:length(bps)-1]
+
+    # Convert all recombination breakpoints to a single table of base pair ranges
+        segments.to.iter <- data.table(start=c(1, bps+1), stop=c(bps, highest.bp))
+
+    # For faster computation, determine which ranges actually contain a SNP,
+    # So that ranges without SNPs can be excluded downstream
+        dat.sites <- copy(dat.vcf[,.(POS)])
+        dat.sites[, nearest := POS]
+        setkey(dat.sites, POS)
+        setkey(segments.to.iter, start)
+        segments.to.iter <- dat.sites[segments.to.iter, list(start, stop, nearest), roll=-Inf]
+        segments.to.iter[, containsSNP := ifelse(nearest >= start & nearest <= stop, TRUE, FALSE)]
+
+        setkey(dat.haps, start, stop)
+
+    # While counting the number of times each haplotype is present in the population
+        range.haplotype.counts.long <- foreach(start.i = segments.to.iter[containsSNP==TRUE][,start], stop.i=segments.to.iter[containsSNP==TRUE][,stop], .inorder=TRUE, .combine="rbind") %do% {
+        # dat.haps[start <= start.i & stop >= stop.i][, list("N"=sum(N), start=start.i, stop=stop.i), by=list(lineID)][]
+		dat.haps[start <= start.i & stop >= stop.i][, .N, by=list(lineID)][]
+        }
+
+    # Convert to wide format to mimic organization of the founder VCF file
+        range.haplotype.counts <- dcast(range.haplotype.counts.long, start+stop ~lineID, value.var="N", fun.aggregate=sum, fill=0)
+	# INSERT START COLUMN HERE
+    # Determine which columns (founder IDs) have 0 representation within the population
+        missing.cols <- genotypeCols[!(genotypeCols %in% unique(range.haplotype.counts.long[,lineID]))]
+
+    # Add columns, fill with frequency of 0
+        if(length(missing.cols) != 0) {
+            range.haplotype.counts[, (missing.cols) := 0]
+        }
+
+    # Rearrange columns in frequency  as the parental VCF
+        setcolorder(range.haplotype.counts, c("start", "stop", genotypeCols))
+    
+# Fast count snps in each window
+    snps <- dat.vcf[,.(POS)]
+    snps[, segment := cut(POS, breaks=unique(c(0,segments.to.iter[containsSNP==TRUE][,stop],+Inf)))]
+    snps[, segment := as.numeric(as.factor(segment))]
+
+    row.nums <- snps[, .N, by=segment][, list(N=rep(segment, N))][,N]
+
+    snp.haplotype.counts <- range.haplotype.counts[row.nums]
+
+    dat.finalCounts <- dat.vcf[,genotypeCols, with=F] * snp.haplotype.counts[,genotypeCols, with=F]
+    dat.finalCounts[, sumRef := Reduce(`+`, lapply(.SD, function(x) replace(x, which(x<0), 0))), .SDcols=genotypeCols]
+    dat.finalCounts[, sumAlt := -1 * Reduce(`+`, lapply(.SD, function(x) replace(x, which(x>0), 0))), .SDcols=genotypeCols]
+    dat.finalCounts[, POS := dat.vcf[,POS]]
+    dat.finalCounts[, "CHROM" := dat.vcf[,"CHROM"]]
+
+    dat.finalCounts[, c("CHROM","POS","sumRef","sumAlt")][]
+
+}
+
+
+
+
+# randomly swap the content of VCF columns while keeping the column order intact
+permuteVCFfounderCols <- function(DT, infoCols, founderCols) {
+
+	# If no argument supplied; default to 1-9 for info cols
+	if(missing(infoCols)) {
+        infoCols <- colnames(DT)[1:9]
+    }
+
+    # If no argument supplied; default to 10- for founder cols
+    if(missing(founderCols)) {
+    	founderCols <- colnames(DT)[10:ncol(DT)]
+    }
+
+    # Random permutation of founder columns
+	colOrder <- sample(founderCols)
+
+	# Reorder columns to permuted order
+	setcolorder(DT, c(infoCols, colOrder))
+
+	# Set names back to original order
+	setnames(DT, c(infoCols, founderCols))
+}
+
+
+doGWAS <- function(dat.haps.all, dat.vcf, eligible_chromosomes, popSize=5000, desiredMAF=0.5, PVE=0.15) {
+	# Choose focal SNP
+	# downsample population
+	downsampledInds <- sample(unique(dat.haps.all[,ind]), size=popSize, replace=TRUE)
+	dat.haps <- dat.haps.all[ind %in% downsampledInds]
+
+	# Pick a random autosome to contain focal SNP
+	focal.chr <- sample(eligible_chromosomes, size=1)
+
+	allFreqs <- calcFreqs(dat.haps[chromosome==focal.chr], dat.vcf[CHROM==focal.chr])[! (sumRef == 0 & sumAlt == 0)]
+	allFreqs[, freq := sumRef/(sumRef+sumAlt)]
+	allFreqs[, percentData := (sumRef + sumAlt) / (2*popSize)]
+	allFreqs <- allFreqs[freq != 0 & freq != 1 & percentData > 0.95]
+	allFreqs[, maf := ifelse(freq > 0.5, abs(freq-1), freq)]
+
+	# Select random SNP to be focal SNP; must be within 0.5% of desired MAF
+	focal.snp <- allFreqs[maf!=0][abs(maf-desiredMAF) <= 0.005][sample(.N, size=1)]
+	
+
+	# Select random SNP to be focal SNP; must be within 0.5% of desired MAF
+	focal.snp <- allFreqs[maf!=0][abs(maf-desiredMAF) <= 0.005][sample(.N, size=1)]
+	
+	# If no SNPs meet this criteria, break out of loop
+	if ( nrow(focal.snp)==0 ) {
+		break
+	}
+	
+	focal.snp.POS <- focal.snp[,POS]
+	focal.snp.CHROM <- focal.snp[,CHROM]
+
+	# Get SNP status at the focal SNP for each founding line
+	genoTable <- data.table(lineID=genotypeCols, genotype=unlist(dat.vcf[CHROM==focal.chr][POS==focal.snp[,POS]][,genotypeCols, with=FALSE]) )
+	setkey(genoTable, lineID)
+
+	# Get lineID present at the focal SNP for each recombinant individual
+	popGenos <- dat.haps[chromosome==focal.snp.CHROM & start <= focal.snp.POS & stop >= focal.snp.POS][, .N, by=list(ind, lineID)]
+	setkey(popGenos, lineID)
+
+	# Merge the two above tables
+	dat.merge <- merge(genoTable, popGenos)
+
+	# Calculate the dosage (effectively, diploid genotype) at focal SNP for each individual
+	dat.dosage <- dat.merge[, list("dosage"=sum(genotype*N)), by=ind][order(ind)]
+
+	# Only include individuals with known diploid genotype
+	dat.dosage <- dat.dosage[dosage %in% c(-2, 0, 2)]
+
+	# Homozogote Alt have increased probability of being in case group
+	dat.dosage[dosage==-2,  grp := sample(c("case","control"), size=1, prob=c(0.5+PVE/2, 0.5-PVE/2)), by=ind ]
+
+	# Heterozygotes have equal probability of case and control
+	dat.dosage[dosage==0,  grp := sample(c("case","control"), size=1), by=ind ]
+
+	# Homozygote Ref have decreased probability of being in case group
+	dat.dosage[dosage==2, grp := sample(c("case","control"), size=1, prob=c(0.5-PVE/2, 0.5+PVE/2)), by=ind ]
+
+	dat.haps.merge <- merge(dat.haps, dat.dosage, by.x="ind", by.y="ind")
+	setkey(dat.haps.merge, chromosome, grp)
+	
+	grpCounts <- dat.dosage[, .N, by=list(grp)]
+
+	# Perform association test on each chromosome
+	stats <- foreach(chr.i = chromosomes, .combine="rbind") %do% {
+
+		caseFreqs <- calcFreqs(dat.haps.merge[.(chr.i, "case")], dat.vcf[.(chr.i)])
+		controlFreqs <- calcFreqs(dat.haps.merge[.(chr.i, "control")], dat.vcf[.(chr.i)])
+		setnames(caseFreqs, c("CHROM","POS","case.Ref", "case.Alt"))
+		setnames(controlFreqs, c("CHROM","POS","control.Ref", "control.Alt"))
+		setkey(caseFreqs, CHROM, POS)
+		setkey(controlFreqs, CHROM, POS)
+
+		freqs.merge <- merge(caseFreqs, controlFreqs)
+		freqs.merge <- freqs.merge[case.Ref != 0 & case.Alt != 0 & control.Ref != 0 & control.Alt != 0]
+
+		# CHISQ test
+		freqs.merge[,chisq := (((case.Ref)+(control.Ref)+((case.Alt))+((control.Alt))) * (((control.Ref)*(case.Alt)) - ((case.Ref)*(control.Alt)))**2) / (((case.Ref)+(control.Ref)) * (((case.Ref)+(case.Alt))) * ((control.Ref)+(control.Alt)) * (((case.Alt))+(control.Alt)))]
+		freqs.merge[,P := pchisq(chisq, 1, lower.tail=FALSE)]
+		
+		# Convert to character and back to numeric for floating point precision reasons
+		freqs.merge[, P := as.numeric(as.character(P)) ]
+
+		return(freqs.merge)
+	}
+	setkey(stats, CHROM, POS)
+	return(list(focal.snp, stats, grpCounts))
+}
+
+
+
+getClusters <- function(DT.topSNPs) {
+
+	# Initialize output data.table
+	DT.results <- DT.topSNPs[0]
+	DT.results[, N_in_cluster := ""]
+	
+	# Iteratively extract 1MB windows centered on most significant SNP until all clusters have been accounted for
+	while(nrow(DT.topSNPs) > 0) {
+	
+		# Determine most significant row; if ties, randomly select one
+		most_signif_chisq <- max(DT.topSNPs[,chisq])
+		most_signif_row <- copy(DT.topSNPs[chisq == most_signif_chisq][sample(.N, size=1)])
+		
+		# Count number of SNPs within +/- 0.5 MB on the same chromosome
+		N_in_cluster <- nrow(DT.topSNPs[ CHROM == most_signif_row[,CHROM] & abs(POS - most_signif_row[,POS]) <= 500000 ])
+		most_signif_row[, "N_in_cluster" := N_in_cluster ]
+		
+		# Update top SNP data.table to only include those at least 0.5 MB away from the previous top SNP
+		DT.topSNPs <- DT.topSNPs[! (CHROM == most_signif_row[,CHROM] & abs(POS - most_signif_row[,POS]) <= 500000) ]
+
+		# Update results table, appending row with new cluster details
+		DT.results <- rbindlist(list(DT.results, most_signif_row))
+		}
+	
+	DT.results[, rank := 1:.N][]
+	return(DT.results)
+}
+
+calculate_GIF <- function(GWAS.DT, case.sample.size, control.sample.size, method="allelic") {
+	chisq_array <- GWAS.DT[,chisq]
+	if(method=="allelic") {
+		expected.median.chisq <- qchisq(0.5, df=1)
+	} else if(method=="genotype") {
+		expected.median.chisq <- qchisq(0.5, df=2)
+	}
+	unadjusted.lambda <- median(chisq_array) / expected.median.chisq
+    lambda.1000 <- 1 + (unadjusted.lambda-1) * (1/case.sample.size + 1/control.sample.size)/(1/1000 + 1/1000)
+	return(lambda.1000)
+}
+
+
+# populationType <- "dgrp"
+# populationType <- "hybrid_swarm"
+
+
+# Read input VCF 
+# Full sized:
+# dat.vcf <- fread("zcat /scratch/caw5cv/genome-reconstruction-old/variants/dgrp2/haplotypes.vcf.gz", na.strings=c(".","./."), showProgress=FALSE, header=TRUE)
+
+# Tiny:
+dat.vcf <- fread("zcat /scratch/caw5cv/low-coverage-genome-imputation/gwas/haplotypes.tiny.vcf.gz", na.strings=c(".","./."), showProgress=FALSE, header=TRUE)
+
+
+setnames(dat.vcf, "#CHROM", "CHROM")
+setkey(dat.vcf, CHROM)
+
+# For GWAS purposes, it doesn't matter that we use a proper subset of founders. Any # of founders can be used. As such, should always load in full VCF file; permute them
+
+# Polarize VCF such that reference = 0; alt = -1; missing data = 0
+polarizeVCF(dat.vcf)
+genotypeCols <- colnames(dat.vcf)[10:ncol(dat.vcf)]
+
+
+
+permuteVCFfounderCols(dat.vcf)
+
+chromosomes <- c("2L","2R","3L","3R","X")
+autosomes <- c("2L","2R","3L","3R")
+
+eligible_chromosomes <- autosomes
+
+popSize <- 5000
+nFounders <- 32
+if(populationType=="dspr") {nFounders <- 800}
+
+# haps.file <- "2.RILS.homozygosed.haps"
+# haps.file <- "32_1.population.haps"
+
+# For inbred DGRP simulations, generate haplotype map of 100% inbred individuals. Otherwise, read in haps.file
+if(populationType=="dgrp") {
+
+	F0Sizes <- data.table(
+	"chromosome"=c("2L","2R","3L","3R","X"),
+	"start"=c(1,1,1,1,1),
+	"stop"=c(23100000,21200000,24600000,28000000,22500000)
+	)
+	
+	tmp <- CJ(chromosome=chromosomes, haplotype=1:2, ind=1:popSize)
+	indIDs <- data.table(ind=1:popSize, lineID=sample(sample(genotypeCols, size=nFounders, replace=FALSE), size=popSize, replace=TRUE))
+	tmp <- merge(tmp, indIDs, by.x="ind", by.y="ind")
+	dat.haps.all <- merge(tmp, F0Sizes, by.x="chromosome", by.y="chromosome")
+	dat.haps.all[, sex := "F"]
+	setcolorder(dat.haps.all, c("chromosome","haplotype","start","stop","ind","sex","lineID"))
+	
+} else {
+	dat.haps.all <- fread(haps.file, header=TRUE, showProgress=FALSE, colClasses=c("character","integer","integer","integer","integer","character","character"))
+
+	# Collapse redundant breakpoints 
+	dat.haps.all[, lineID_rleid := rleid(chromosome, haplotype, ind, lineID)]
+	haps.collapsed <- dat.haps.all[, list(chromosome,haplotype,start=min(start), stop=max(stop), ind, sex, lineID), by=lineID_rleid]
+	haps.collapsed[,lineID_rleid := NULL]
+	dat.haps.all <- haps.collapsed[!duplicated(haps.collapsed)]
+	dat.haps.all[]
+}
+
+setkey(dat.haps.all, chromosome)
+
+
+#for(PVE in c(0.05, 0.10, 0.15)) {
+#	for(desiredMAF in c(1/32, 1/16, 1/8, 2/8, 3/8, 4/8)) {
+#		for(rep in 1:2) {
+#			# do
+#		}	
+#	}
+#}
+
+# Initialize output file
+
+write.table(t(c("population_type","N_founders","Nth_population","Replicate","N_variable_sites","PVE","MAF_desired","MAF_actual","focal_snp_CHR","focal_snp_POS","focal_snp_freq","focal.chisq","top_snp_CHR","top_snp_POS","top_snp_CHISQ","N_equally_top_SNPs","focal_snp_CHISQ_rank","median_chisq","N_case","N_control","lambda_GC_1000","N_false_positive_chimneys_above_5")), file="results.txt", col.names=FALSE, sep="\t", quote=F, row.names=F)
+nReplicates <- 100
+desiredMAF <- 0.5
+PVE <- 0.10
+
+#dir <- paste("/scratch/caw5cv/genome-reconstruction-old/variants/dgrp2/"0.05X/
+
+
+
+#system.time({
+#	gwas_results <- doGWAS(dat.haps.all, dat.vcf, eligible_chromosomes, popSize=5000, desiredMAF, PVE)
+#})
+#
+
+# folder is paste(nFounders, "_", nth_population, sep="")
+for(replicate in 1:nReplicates) {
+
+	# Randomly shuffle vcf columns
+	permuteVCFfounderCols(dat.vcf)
+
+	# Perform GWAS
+	gwas_results <- doGWAS(dat.haps.all, dat.vcf, eligible_chromosomes, popSize=5000, desiredMAF, PVE)
+	
+	# for dgrp2, permute VCF _AND_ founders within population? No  need, permuting VCF handles that.
+				
+	focal.chr <- gwas_results[[1]][,CHROM]
+	focal.pos <- gwas_results[[1]][,POS]
+	focal.freq <- gwas_results[[1]][,freq]
+	focal.maf <- gwas_results[[1]][,maf]
+	grpCounts <- gwas_results[[3]]
+	
+	# If not hybrid_swarm population, then allele counts are NOT independent, and chisq values need to be corrected
+	# as the sample size is half as large
+	if(populationType != "hybrid_swarm") {
+		gwas_results[[2]][,chisq := chisq/2]
+		gwas_results[[2]][,P := pchisq(chisq, 1, lower.tail=FALSE)]
+		# Convert to character and back to numeric for floating point precision reasons
+		gwas_results[[2]][, P := as.numeric(as.character(P)) ]
+	}
+
+	g <- ggplot(data=gwas_results[[2]][P < 0.1], mapping=aes(x=POS, y=-1*log10(P)))+ geom_point(shape=21, alpha=0.25) + facet_grid(.~CHROM) + geom_vline(data=data.frame(xint=focal.pos,"CHROM"=focal.chr),aes(xintercept=xint),linetype="dotted", color="red", alpha=0.25)
+				
+	focal.chisq <- gwas_results[[2]][CHROM==focal.chr & POS == focal.pos, chisq]
+	top.chisq <- max(gwas_results[[2]][,chisq])
+	top_snp <- gwas_results[[2]][chisq == top.chisq][sample(.N, size=1)]
+	
+	false_pos_snps <- gwas_results[[2]][chisq >= focal.chisq][! (CHROM==focal.chr & abs(POS-focal.pos) <= 500000) ][ P < 1e-5]
+
+	false_pos_clusters <- getClusters(false_pos_snps)
+	false_pos_clusters[, distFromFocalSNP := ifelse(CHROM==focal.chr, abs(POS-focal.pos), Inf)]
+	
+	lambda.1000 <- calculate_GIF(gwas_results[[2]], case.sample.size=grpCounts[grp=="case", N], control.sample.size=grpCounts[grp=="control", N], method="allelic")
+	gwas_results[[2]][,rank := frank(-chisq, ties.method="random")]
+	
+	results_out <- data.table(
+		"population_type" = "HybridSwarm",
+		"N_founders" = 32,
+		"Nth_population" = 1,
+		"Replicate" = replicate,
+		"N_variable_sites" = nrow(gwas_results[[2]]),
+		"PVE" = PVE,
+		"MAF_desired" = desiredMAF,
+		"MAF_actual" = focal.maf,
+		"focal_snp_CHR" = focal.chr,
+		"focal_snp_POS" = focal.pos,
+		"focal_snp_freq" = focal.freq,
+		"focal.chisq" = focal.chisq,
+		"top_snp_CHR" = top_snp[,CHROM],
+		"top_snp_POS" = top_snp[,POS],
+		"top_snp_CHISQ" = top_snp[,chisq],
+		"N_equally_top_SNPs" = nrow(gwas_results[[2]][chisq == top.chisq]),
+		"focal_snp_CHISQ_rank" = gwas_results[[2]][CHROM==focal.chr & POS==focal.pos, rank],
+		"median_chisq" = median(gwas_results[[2]][,chisq]),
+		"N_case" = grpCounts[grp=="case", N],
+		"N_control" = grpCounts[grp=="control", N],
+		"lambda_GC_1000" = lambda.1000,
+		"N_false_positive_chimneys_above_5" = nrow(false_pos_clusters)
+	)
+	
+	write.table(results_out, file="results.txt", col.names=FALSE, sep="\t", quote=F, row.names=FALSE, append=TRUE)
+}	
+
+#  # Calculate genomic inflation factor (lambda)
+#      observed.median.chisq <- median(dat.plink[,CHISQ], na.rm=TRUE)
+#  
+#  if(test=="ALLELIC") {
+#    expected.median.chisq <- qchisq(0.5, df=1)
+#   } else if(test=="GENO") {
+#    expected.median.chisq <- qchisq(0.5, df=2)
+#  }
+
+
+
+# correct GIF to reflect sample size of 1000 in case and control populations
+
+
+system.time({
+gwas_results <- doGWAS(dat.haps.all, dat.vcf, eligible_chromosomes, popSize=5000, desiredMAF=1/8, PVE=0.15)
+})
+
+focal.chr <- gwas_results[[1]]
+focal.pos <- gwas_results[[2]]
+
+g <- ggplot(data=gwas_results[[3]][P < 0.1], mapping=aes(x=POS, y=-1*log10(P)))+ geom_point(shape=21, alpha=0.25) + facet_grid(.~CHROM) + geom_vline(data=data.frame(xint=focal.pos,"CHROM"=focal.chr),aes(xintercept=xint),linetype="dotted", color="red", alpha=0.25)
+
+
+# permute VCF for every independent iteration
+# for PVE
+#	for desiredMAF
+#		for Repetition 1:100
+
+for (shuffle in 1:2) {
+
+    permuteVCFfounderCols(dat.vcf)
+    for (rep in 1:2) {
+	
+        for (desiredMAF in c(1/32, 1/16, 1/8, 2/8, 3/8, 4/8)) {
+
+        }
+    }
+}
+
+
+
+g2 <- ggplot(data=gwas_results[[3]][P < 0.1][! (CHROM==focal.chr & abs(POS-focal.pos) <= 1e6)], mapping=aes(x=POS, y=-1*log10(P)))+ geom_point(shape=21, alpha=0.25) + facet_grid(.~CHROM) + geom_vline(data=data.frame(xint=focal.pos,"CHROM"=focal.chr),aes(xintercept=xint),linetype="dotted", color="red", alpha=0.25)
+
+
+g3 <- ggplot(data=gwas_results[[3]][P < 0.1][! (CHROM==focal.chr & abs(POS-focal.pos) <= 0.5e6)][! (CHROM=="2R" & abs(POS-19125219) <= 0.5e6)], mapping=aes(x=POS, y=-1*log10(P)))+ geom_point(shape=21, alpha=0.25) + facet_grid(.~CHROM) + geom_vline(data=data.frame(xint=focal.pos,"CHROM"=focal.chr),aes(xintercept=xint),linetype="dotted", color="red", alpha=0.25)
+
+
+
+
+focal_snp_chisq <- gwas_results[[3]][CHROM==focal.chr & POS == focal.pos, chisq]
+false_pos_snps <- gwas_results[[3]][chisq >= focal_snp_chisq][! (CHROM==focal.chr & abs(POS-focal.pos) <= 500000) ][ P < 1e-5]
+
+
+
+getClusters(false_pos_snps)
+	
+	
+##	# Set table including SNPs at least as significant as true SNP
+##	positives <- gwas_table[chisq >= focal.chisq]
+##	count <- (-1)
+##	while (nrow(positives) > 0) {
+##		# Select most significant SNP
+##		topSNP <- positives[which.max(chisq)][sample(.N, size=1)]
+##		
+##		# Remove SNPs within half of a megabase around that SNP on the same chromosome
+##		positives <- positives[ ! (CHROM == topSNP$CHROM & abs(POS-topSNP$POS) <= 5e5 ) ]
+##		count <- count + 1
+##	}
+##	
+##}
+
+##count_chimneys <- function(gwas_table, focal.chr, focal.pos) {
+##	focal.chisq <- gwas_table[.(focal.chr, focal.pos)]$chisq
+##	
+##	# Set table including SNPs at least as significant as true SNP
+##	positives <- gwas_table[chisq >= focal.chisq]
+##	count <- (-1)
+##	while (nrow(positives) > 0) {
+##		# Select most significant SNP
+##		topSNP <- positives[which.max(chisq)][sample(.N, size=1)]
+##		
+##		# Remove SNPs within half of a megabase around that SNP on the same chromosome
+##		positives <- positives[ ! (CHROM == topSNP$CHROM & abs(POS-topSNP$POS) <= 5e5 ) ]
+##		count <- count + 1
+##	}
+##	
+##}
+
+##assoc.test[,fishersP := (((case.Ref + control.Ref)/case.Ref)*((case.Alt + control.Alt)/case.Alt))/((case.Ref + control.Ref + case.Alt + control.Alt)/(case.Ref + case.Alt))]
+##
+##          
+##
+##snp <- fread('snp.dat')
+##plink.dat <- fread('zcat chr2.assoc.gz')
+##g2 <- ggplot(data=plink.dat, mapping=aes(x=BP, y=-1*log10(P))) + geom_point(alpha=0.25, shape=21) + geom_vline(xintercept=snp$POS, color="red", alpha=0.5)
+##
+##library(ggthemes)
+##
+##g + geom_vline(xintercept=snp$POS, color="red", alpha=0.5) + theme_few(18) + labs(title="Cory's Method")
+##
+##g2 + geom_vline(xintercept=snp$POS, color="red", alpha=0.5) + theme_few(18) + labs(title="Plink Method")
+
+

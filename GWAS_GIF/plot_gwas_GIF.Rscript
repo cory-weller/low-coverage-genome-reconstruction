@@ -1,0 +1,121 @@
+#!/usr/bin/env Rscript
+
+library(data.table)
+library(ggplot2)
+library(ggthemes)
+library(cowplot)
+
+
+dat <- fread('GIF.all.tab', sep="\t", col.names=c("population_type", "population_stem", "N_founders", "MAF", "PVE", "Population_Replicate", "Replicate", "focal_snp_chr", "focal_snp_pos", "N_case_individuals", "N_control_individuals", "GIF_all_autosomes", "GIF_focal_arm", "GIF_focal_chr", "GIF_excluding_focal_arm", "GIF_excluding_focal_chr"),  colClasses=c("character","character","integer","numeric","numeric","integer","integer","character","integer","integer","integer","numeric","numeric","numeric","numeric","numeric"))
+dat[, population := paste(population_stem, N_founders, sep="_")]
+
+
+dat.long <- melt(dat, measure.vars=c("GIF_all_autosomes", "GIF_focal_arm", "GIF_focal_chr", "GIF_excluding_focal_arm", "GIF_excluding_focal_chr"), variable.name="GIF_type", value.name="GIF")
+
+dat.long[GIF_type=="GIF_all_autosomes", GIF_label := "All autosomes"]
+dat.long[GIF_type=="GIF_focal_arm", GIF_label := "Autosome arm with causal SNP"]
+dat.long[GIF_type=="GIF_focal_chr", GIF_label := "Whole autosome with causal SNP"]
+dat.long[GIF_type=="GIF_excluding_focal_arm", GIF_label := "Autosome arms without causal SNP"]
+dat.long[GIF_type=="GIF_excluding_focal_chr", GIF_label := "Whole autosome without causal SNP"]
+dat.long[, GIF_label := factor(GIF_label, levels=c("All autosomes","Autosome arm with causal SNP","Whole autosome with causal SNP","Autosome arms without causal SNP","Whole autosome without causal SNP"))]
+
+dat.long[population=="dgrp_128", population_label := "ILs"]
+dat.long[population=="dspr_800", population_label := "RILs"]
+dat.long[population=="hybrid_swarm_32", population_label := "HS 32"]
+dat.long[population=="hybrid_swarm_128", population_label := "HS 128"]
+dat.long[population=="outbred_dgrp_F50_128", population_label := "Outbred"]
+
+dat.long[, population_label := factor(population_label, levels=c("ILs", "RILs","HS 32","HS 128","Outbred" ))]
+
+
+
+
+dat.long[PVE==0.1, PVE_label := "10% PVE"]
+dat.long[PVE==0.05, PVE_label := "5% PVE"]
+dat.long[PVE==0, PVE_label := "0% PVE (No association)"]
+dat.long[PVE==0, MAF := 0]
+
+
+dat.long[MAF==0.125, MAF_label := "12.5% Freq."]
+dat.long[MAF==0.25, MAF_label := "25% Freq."]
+dat.long[MAF==0.5, MAF_label := "50% Freq."]
+dat.long[MAF==0, MAF_label := "No Genotype-Phenotype Association"]
+dat.long[MAF==0 & GIF_label != "All autosomes", GIF := NA]
+
+dat.long[, MAF_label := factor(MAF_label, levels=c("12.5% Freq.", "25% Freq.", "50% Freq.", "No Genotype-Phenotype Association"))]
+
+
+#dat.long[, PVE_label := factor(PVE_label, levels=c("PVE: 0.5", "PVE: 0.25", "PVE: 0.125"))]
+#dat.long[, population_label := factor(population_label, levels=c("Hybrid Swarm (32)", "Hybrid Swarm (128)", "Recombinant Inbred Lines (800)", "Inbred Lines (128)"))]
+
+dat.ag <- na.omit(dat.long)[, list(
+    qBottom=quantile(GIF, 0.025),
+    qLower=quantile(GIF, 0.25),
+    qMiddle=quantile(GIF, 0.5),
+    qUpper=quantile(GIF, 0.75),
+    qMax=quantile(GIF, 0.975)), by=list(GIF_label, GIF_type, population_type, N_founders, MAF, PVE, population_label, PVE_label, MAF_label)]
+
+
+g.GIF.subset <-  ggplot(dat.ag[PVE != 0.05 & MAF %in% c(0.5, 0.125) & GIF_label %in% c("All autosomes", "Whole autosome without causal SNP","Autosome arm with causal SNP")], mapping=aes(x=population_label, fill=GIF_label, min=qBottom, lower=qLower, middle=qMiddle, upper=qUpper, max=qMax)) +
+        geom_boxplot(stat="identity", color="black") +
+        geom_hline(yintercept=1, linetype="dashed", color="gray20", alpha=1) +
+        facet_grid(MAF_label~population_label, scales="free", switch="x") +
+        labs(x="Mapping Population", y=expression(lambda[1000]), fill="", title="") +
+        scale_fill_manual(values=c("gray80","gray40", "white")) +
+        theme(legend.position="bottom", plot.title=element_blank()) +
+      theme(axis.text.x=element_blank(),
+              axis.ticks.x=element_blank())
+
+ggsave(g.GIF.subset, file="Fig7.png", width=20, height=15, units="cm")
+
+g1 <- plot_grid(g.GIF.subset, g.GIF.subset2, labels = "AUTO", ncol = 2, align = 'h', rel_widths=c(2,1))
+
+
+g.GIF.nogenophenolink <-  ggplot(dat.ag[PVE != 0.05 & MAF %in% c(0) & GIF_label %in% c("All autosomes", "Whole autosome without causal SNP","Autosome arm with causal SNP")], mapping=aes(x=population_label, min=qBottom, lower=qLower, middle=qMiddle, upper=qUpper, max=qMax)) +
+        geom_boxplot(stat="identity", color="black") +
+        geom_hline(yintercept=1, linetype="dashed", color="gray20", alpha=1) +
+        labs(x="Mapping Population", y=expression(lambda[1000]), fill="", title="") +
+        scale_fill_manual(values=c("gray80","gray40", "white")) +
+        theme(legend.position="bottom", plot.title=element_blank())
+
+ggsave(g.GIF.nogenophenolink, file="S12.png", width=13, height=13, units="cm")
+
+g.GIF.all2 <- ggplot(data=dat.ag[PVE>0], mapping=aes(x=population_label, min=qBottom, lower=qLower, middle=qMiddle, upper=qUpper, max=qMax, fill=GIF_label, color=GIF_label)) +
+geom_hline(yintercept=1, linetype="solid", color="black") +
+geom_boxplot(stat="identity", alpha=0.3) +
+facet_grid(PVE_label~MAF_label) +
+theme(legend.position="bottom") +
+theme_few(12) +
+theme(axis.text.x = element_text(angle = 32, hjust = 1)) +
+labs(x="Mapping Population", y=expression(lambda[1000]), color="GIF for:") +
+guides(fill=FALSE) +
+theme(legend.position="bottom", legend.direction="vertical", plot.title=element_blank())
+
+
+# write.table(dat.long.ag, file="GIF_summaries.tab", sep="\t", quote=F, row.names=F, col.names=T)
+
+g.GIF.subset <- ggplot(data=dat.long[PVE != 0.05 & MAF %in% c(0.5, 0.125, 0) & GIF_label %in% c("All autosomes", "Autosome arms without causal SNP","Autosome arm with causal SNP")], mapping=aes(x=population_label , y=GIF, fill=GIF_label)) +
+geom_hline(yintercept=1, linetype="solid", color="black") +
+geom_boxplot(alpha=0.6) +
+facet_grid(.~MAF_label) +
+theme(legend.position="bottom") +
+theme_few(10) +
+theme(axis.text.x = element_text(angle = 32, hjust = 1)) +
+labs(x="Mapping Population", y=expression(lambda[1000]), fill="", title="") +
+scale_fill_manual(values=c("white","black", "gray")) +
+theme(legend.position="bottom", plot.title=element_blank())
+
+g.GIF.all <- ggplot(data=dat.long[PVE>0], mapping=aes(x=population_label , y=GIF, fill=GIF_label, color=GIF_label)) +
+geom_hline(yintercept=1, linetype="solid", color="black") +
+geom_boxplot(alpha=0.3) +
+facet_grid(PVE_label~MAF_label) +
+theme(legend.position="bottom") +
+theme_few(12) +
+theme(axis.text.x = element_text(angle = 32, hjust = 1)) +
+labs(x="Mapping Population", y=expression(lambda[1000]), color="GIF for:") +
+guides(fill=FALSE) +
+theme(legend.position="bottom", legend.direction="vertical", plot.title=element_blank())
+
+
+ggsave(g.GIF.subset2, file="Figure_07_GIF.png", width=18, height=12, units="cm")
+ggsave(g.GIF.all2, file="Figure_S11_GIF.png", width=25, height=20, units="cm")

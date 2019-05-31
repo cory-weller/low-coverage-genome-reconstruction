@@ -1,0 +1,57 @@
+#!/usr/bin/env Rscript
+
+library(data.table)
+library(ggplot2)
+library(foreach)
+
+args <- commandArgs(trailingOnly=TRUE)
+ind_id <- args[1]
+nFounders <- args[2]
+nGenerations <- args[3]
+
+estimate.filename <- paste("zcat ", ind_id, ".estimate.vcf.gz", sep="")
+true.vcf.filename <- paste("zcat ", ind_id, ".vcf.gz", sep="")
+sites.filename <- "zcat sites.vcf.gz"
+
+estimate.vcf <- fread(estimate.filename, header=FALSE, na.strings="./.", showProgress=FALSE, col.names=c("CHR","POS","e1","e2"), key=c("CHR","POS"))
+true.vcf <- fread(true.vcf.filename, header=TRUE, na.strings="./.", showProgress=FALSE, col.names=c("a1","a2"))
+sites.vcf    <- fread(sites.filename, header=TRUE, na.strings="./.", showProgress=FALSE, col.names=c("CHR","POS"), key=c("CHR","POS"))
+
+# combine true chromosome/site columns with true genotype columns
+true.vcf <- cbind(sites.vcf, true.vcf)
+
+# combine truth with estimate
+all.vcf <- merge(true.vcf, estimate.vcf)
+
+# remove any rows containing missing information
+all.vcf <- all.vcf[!is.na(a1) & ! is.na(a2) & ! is.na(e1) & ! is.na(e2)]
+
+# Convert "0/0" and "1/1" to "0" and "1"
+if(any(all.vcf=="0/0") | any(all.vcf=="1/1")) {
+    all.vcf[, c("a1","a2","e1","e2") := lapply(.SD, factor, levels=c("0/0","1/1")), .SDcols=c("a1","a2","e1","e2")]
+    all.vcf[, c("a1","a2","e1","e2") := lapply(.SD, as.numeric), .SDcols=c("a1","a2","e1","e2")]
+    all.vcf[, c("a1","a2","e1","e2") := lapply(.SD, "-", 1), .SDcols=c("a1","a2","e1","e2")]
+}
+
+# calculate alt dosage by summing both "actual" alleles, and summing both "estimate" alleles
+# "actual" and "estimate" columns will take on values of either (0, 1, 2) where 0=ref/ref, 1=heterozygote, 2=alt/alt
+all.vcf[, actual := a1 + a2] 
+all.vcf[, estimate := e1 + e2]
+
+# Iterate through chromosomes, calculating  the fraction of sites where actual == estimate
+dat.all <- rbindlist(foreach(chr.i = unique(all.vcf[,CHR])) %do% {
+    nSitesVariableInPopulation <- dim(sites.vcf[.(chr.i)])[1]
+    nSites <- dim(all.vcf[.(chr.i)])[1]
+    nMatches <- dim(all.vcf[.(chr.i)][actual==estimate])[1]
+    percentMatches <- nMatches/nSites
+    return(data.table "CHR"=chr.i, nSitesVariableInPopulation, nSites, nMatches, percentMatches))
+})
+
+# add parameter columns
+dat.all[, "ind_id" := ind_id]
+dat.all[, "nFounders" := nFounders]
+dat.all[, "nGenerations" := nGenerations]
+
+# write output
+setcolorder(dat.all, c("ind_id", "nFounders", "nGenerations", "CHR", "nSitesVariableInPopulation", "nSites", "nMatches", "percentMatches"))
+write.table(dat.all, file=paste(ind_id, ".summary.dat", sep=""), quote=FALSE, row.names=FALSE, col.names=TRUE, sep="\t")
